@@ -15,7 +15,8 @@ export const useCounterStore = defineStore('counter', {
         },
     },
     actions: {
-        increment() {
+        increment(name) {
+            console.log(name)
             this.count++;
             this.fruits.push('栗子');
             return 123;
@@ -23,22 +24,22 @@ export const useCounterStore = defineStore('counter', {
     },
 });
 
-// export const useCounterStore = defineStore('counter', () => {
-//     const state = reactive({
-//         count: 0
-//     });
+export const useCounter1Store = defineStore('counter1', () => {
+    const state = reactive({
+        count: 0
+    });
 
-//     const doubleCount = computed(() => {
-//         return state.count * 2;
-//     })
+    const doubleCount = computed(() => {
+        return state.count * 2;
+    })
 
-//     const increment = () => {
-//         state.count++;
-//     }
+    const increment = () => {
+        state.count++;
+    }
 
-//     return {
-//         ...toRefs(state),
-//         increment,
-//         doubleCount
-//     }
-// })
+    return {
+        ...toRefs(state),
+        increment,
+        doubleCount
+    }
+})

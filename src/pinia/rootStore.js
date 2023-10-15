@@ -1,1 +1,1 @@
-export const SymbolPinia = Symbol();
+export const piniaSymbol = Symbol()

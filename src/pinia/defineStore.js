@@ -1,73 +1,86 @@
-import { isObject } from '@vue/shared';
-import {
-    computed,
-    effectScope,
-    getCurrentInstance,
-    inject,
-    isRef,
-    reactive,
-    toRefs,
-    watch,
-} from 'vue';
+import { effectScope, getCurrentInstance, inject, reactive, computed, isReactive, isRef, toRefs, watch } from 'vue';
+import { piniaSymbol } from './rootStore';
 import { addSubscription, triggerSubscription } from './pubSub';
-import { SymbolPinia } from './rootStore';
+import { setActivePinia, activePinia } from './createPinia'
 
-export function defineStore(idOrOptions, setup) {
-    // 处理参数
-    let id;
-    let options;
-    if (typeof idOrOptions === 'string') {
-        id = idOrOptions;
-        options = setup;
-    } else {
-        id = idOrOptions.id;
-        options = idOrOptions;
-    }
+function isComputed(value) {
+    return !!(value && isRef(value) && value.effect);
+}
 
-    const isSetupStore = typeof setup === 'function';
+function isObject(value) {
+    return !!(value && typeof value === 'object' && value !== null)
+}
 
-    // 创建store
-    function useStore() {
-        const currentInstance = getCurrentInstance();
-        // 这里表示useStore只能在setup中调用
-        // 注入创建的pinia
-        const pinia = currentInstance && inject(SymbolPinia);
-
-        // 避免重复创建
-        if (!pinia._s.has(id)) {
-            if (isSetupStore) {
-                createSetupStore(id, setup, pinia);
-            } else {
-                createOptionsStore(id, options, pinia);
-            }
+function mergeReactiveObject(target, state) {
+    // 改变的是state中的值
+    for (let key in state) {
+        // 如果不是自己自己属性，则直接跳过
+        if (!state.hasOwnProperty(key)) continue;
+        const oldValue = target[key];
+        const newValue = state[key];
+        if (isObject(oldValue) && isObject(newValue) && !isRef(newValue)) {
+            target[key] = mergeReactiveObject(oldValue, newValue);
+        } else {
+            target[key] = newValue;
         }
-
-        const store = pinia._s.get(id);
-        return store;
     }
-
-    return useStore;
+    return target;
 }
 
 
-// 处理函数形式
-function createSetupStore(id, setup, pinia) {
+
+
+function createSetupStore(id, setup, pinia, isOption = false) {
     let scope;
 
-    // _e能够停止所有的store，为了能够单独停止某一个store，因此对每个store都需要再创建一个scope
-    // 执行setup函数，获取返回值【Object】
+    // 后续一些不是用户定义的属性和方法，而是系统内置的api会增加到这个store上
+
+    function $patch(partailStateOrMutation) {
+        if (typeof partailStateOrMutation === 'function') {
+            // 当$patch 中传递的是一个函数时，会自动的给他传递一个store的参数。
+            // 不需要手动的传入一个store
+            partailStateOrMutation(pinia.state.value[id]);
+        } else {
+            mergeReactiveObject(pinia.state.value[id], partailStateOrMutation);
+        }
+    }
+
+    let actionSubscribes = [];
+    const partialState = {
+        $patch,
+        $subscribe(callback, options = {}) {
+            scope.run(() =>
+                watch(pinia.state.value[id], (state) => {
+                    callback({ storeId: id }, state);
+                })
+            );
+        },
+        $onAction: addSubscription.bind(null, actionSubscribes),
+        $dispose: () => {
+            // 调用store上的依赖收集
+            scope.stop();
+            actionSubscribes = [];
+            pinia._s.delete(id); // 删除store
+        },
+    }
+
+    const store = reactive(partialState);
+
+    const initialState = pinia.state.value[id];
+
+    if (!initialState && !isOption) {
+        pinia.state.value[id] = {}
+    }
+
     const setupStore = pinia._e.run(() => {
         scope = effectScope();
-        // 直接执行setup函数
-        return scope.run(() => setup());
-    });
-    // 将当前状态与id进行绑定
-    pinia.state.value[id] = setupStore;
 
-    // 包转器
+        return scope.run(() => setup())
+    })
+
+
     function wrapAction(name, action) {
         return function () {
-
             // 并且对函数包裹之后，可以在触发函数时，做一些额外的处理
 
             const afterCallbackList = [];
@@ -113,65 +126,35 @@ function createSetupStore(id, setup, pinia) {
             }
 
             return ret;
-        };
-    }
-
-    // 对返回值【Object】中属于函数的属性，进行一层包装
-    for (let key in setupStore) {
-        const prop = setupStore[key];
-        if (typeof prop === 'function') {
-            setupStore[key] = wrapAction(key, prop);
         }
     }
 
-    function mergeReactiveObject(target, partailState) {
-        for (let key in partailState) {
-            // 如果不是自己自己属性，则直接跳过
-            if (!partailState.hasOwnProperty(key)) continue;
-            const oldValue = target[key];
-            const newValue = partailState[key];
-            if (isObject(oldValue) && isObject(newValue) && !isRef(newValue)) {
-                target[key] = mergeReactiveObject(oldValue, newValue);
-            } else {
-                target[key] = newValue;
+    for (const key in setupStore) {
+        const prop = setupStore[key];
+
+        if (typeof prop === 'function') {
+            setupStore[key] = wrapAction(key, prop)
+        }
+
+        if (isRef(prop) && !isComputed(prop) || isReactive(prop)) {
+
+            if (!isOption) {
+                pinia.state.value[id][key] = prop;
+
             }
         }
-        return target;
     }
 
-    function $patch(partailStateOrMutation) {
-        if (typeof partailStateOrMutation === 'function') {
-            // 当$patch 中传递的是一个函数时，会自动的给他传递一个store的参数。
-            // 不需要手动的传入一个store
-            partailStateOrMutation(store);
-        } else {
-            mergeReactiveObject(store, partailStateOrMutation);
-        }
-    }
-    let actionSubscribes = [];
-    const partialState = {
-        $patch,
-        $subscribe(callback, options) {
-            scope.run(() =>
-                watch(pinia.state.value[id], (state) => {
-                    // 传递修改方式和最新值
-                    // 如何活该修改方式呢？需要将这个type当作一个全局变量，记录type的改动过程
-                    // 例如在patch中，如果传递的是一个函数，这这里的type则需要改成function
-                    // 这里直接写死了
-                    callback({ type: 'direc' }, state);
-                })
-            );
-        },
-        // 绑定参数, 调用onAction其实就是进行订阅
-        $onAction: addSubscription.bind(null, actionSubscribes),
-        $dispose: () => {
-            scope.stop();
-            actionSubscribes = [];
-            pinia._s.delete(id); // 删除store
-        },
-    };
-    // 创建一个store【reactive】，保存在pinia._s中，并返回
-    const store = reactive(partialState);
+    pinia._s.set(id, store)
+    store.$id = id;
+
+    pinia._p.forEach((plugin) =>
+        // plugin中返回值时，将返回值合并到store中
+        Object.assign(store, plugin({ store, pinia, app: pinia._a }))
+    );
+
+    // 合并一下
+    Object.assign(store, setupStore);
 
     Object.defineProperty(store, '$state', {
         get: () => pinia.state.value[id],
@@ -180,49 +163,100 @@ function createSetupStore(id, setup, pinia) {
         },
     });
 
-    // 每个store都调用一下plugin，并进行合并，达到状态进行全局共享
-    Object.assign(store, setupStore);
-    pinia._p.forEach((plugin) =>
-        Object.assign(store, plugin({ store, pinia, app: pinia._a }))
-    );
 
 
-    pinia._s.set(id, store);
+
     return store;
 }
 
-function createOptionsStore(id, options, pinia) {
-    // options API 一般包含 state， getters， action三个选项
-    let { state, getters, actions } = options;
 
+function createOptionsStore(id, options, pinia) {
+
+    const { state, getters, actions } = options;
+
+    // 处理 state getters actions;
     function setup() {
         pinia.state.value[id] = state ? state() : {};
 
-        // 如果reactive中的属性值是基本类型，此时computed就不会生效。
-        // 因此需要使用toRefs进行包裹
-        // const localState = toRefs(pinia.state.value[id]);
-        const localState = state()
+        // $patch 中修改的是pinia.state.value 中的经过reactive之后的值，而在组件中使用的是一个Object.assign 合并后的值。
+        // 因此修改pinia.state.value 中的count 并不会使得store.count改变。
+        const localState = toRefs(pinia.state.value[id])
+
         return Object.assign(
-            localState,
-            actions,
-            Object.keys(getters || {}).reduce((computedGetters, name) => {
-                computedGetters[name] = computed(() => {
-                    return getters[name].call(store, store);
-                });
-                return computedGetters;
+            localState, // 用户状态
+            actions, // 用户动作
+            Object.keys(getters || {}).reduce((memo, name) => { // 用户计算属性
+                memo[name] = computed(() => {
+                    return getters[name].call(store, store)
+                })
+                return memo
             }, {})
         );
     }
 
-    const store = createSetupStore(id, setup, pinia);
+
+
+    const store = createSetupStore(id, setup, pinia, true)
 
     store.$reset = function () {
-        // 获取原始状态，并调用$patch 进行批量修改
         const newState = state ? state() : {};
-        store.$patch(($state) => {
-            Object.assign($state, newState);
-        });
-    };
+        store.$patch((state) => {
+            Object.assign(state, newState)
+        })
+    }
+
     return store;
+
+
 }
 
+export function defineStore(idOrOptions, setup) {
+    let id;
+    let options;
+
+    if (typeof idOrOptions === 'string') {
+        id = idOrOptions;
+        options = setup;
+    } else {
+        options = idOrOptions;
+        id = idOrOptions.id;
+    }
+
+    const isSetupStore = typeof options === 'function';
+
+
+
+    function useStore() {
+        let instance = getCurrentInstance();
+
+        let pinia = instance && inject(piniaSymbol);
+
+
+        if (pinia) {
+            setActivePinia(pinia)
+        }
+
+        pinia = activePinia;
+
+        if (!pinia._s.has(id)) {
+
+            if (isSetupStore) {
+                createSetupStore(id, options, pinia, false)
+            } else {
+                // 建立id 与 store中间的映射
+                createOptionsStore(id, options, pinia, true)
+            }
+
+
+        }
+
+        const store = pinia._s.get(id);
+
+
+        return store;
+
+
+    }
+
+    return useStore;
+}

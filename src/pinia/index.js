@@ -1,2 +1,3 @@
-export { createPinia } from './createPinia';
-export { defineStore } from './defineStore';
+export * from './createPinia'
+export * from './defineStore'
+export * from './storeToRefs'
